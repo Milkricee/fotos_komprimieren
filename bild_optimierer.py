@@ -17,36 +17,45 @@ SUPPORTED_EXTENSIONS = (
 )
 
 def process_images_logic(source_base, destination_base, progress_callback):
+    # 1. Finde alle passenden Dateien REKURSIV mit os.walk()
     files_to_process = []
-    for filename in os.listdir(source_base):
-        if filename.lower().endswith(SUPPORTED_EXTENSIONS):
-            files_to_process.append(filename)
+    for dirpath, _, filenames in os.walk(source_base):
+        for filename in filenames:
+            if filename.lower().endswith(SUPPORTED_EXTENSIONS):
+                full_path = os.path.join(dirpath, filename)
+                files_to_process.append(full_path)
 
     total_images = len(files_to_process)
     if total_images == 0:
-        messagebox.showinfo("Information", "Keine unterstützten Bilddateien im gewählten Ordner gefunden.")
+        messagebox.showinfo("Information", "Keine unterstützten Bilddateien im gewählten Ordner oder dessen Unterordnern gefunden.")
         progress_callback("Bereit.")
         return
 
     failed_files = []
     processed_count = 0
 
-    for i, filename in enumerate(files_to_process, 1):
+    # 2. Verarbeite die Liste der gefundenen Dateien (jetzt mit vollem Pfad)
+    for i, source_path in enumerate(files_to_process, 1):
+        filename = os.path.basename(source_path) # Hole den reinen Dateinamen aus dem Pfad
         progress_callback(f"Verarbeite {i}/{total_images}: {filename}")
-        source_path = os.path.join(source_base, filename)
 
         try:
             with Image.open(source_path) as img:
-                img.load()  # Stelle sicher, dass das Bild geladen ist
+                img.load()
 
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
 
+                # 3. Stelle die Ordnerstruktur im Ziel wieder her
+                # Ermittle den relativen Pfad des Unterordners
+                relative_dir = os.path.relpath(os.path.dirname(source_path), source_base)
+                
                 name_stem, _ = os.path.splitext(filename)
                 output_filename = f"{name_stem}.avif"
 
                 for profil_name, config in AUSGABE_PROFILE.items():
-                    dest_folder = os.path.join(destination_base, profil_name)
+                    # Baue den Zielordner inklusive des relativen Unterordners zusammen
+                    dest_folder = os.path.join(destination_base, profil_name, relative_dir)
                     os.makedirs(dest_folder, exist_ok=True)
                     output_path = os.path.join(dest_folder, output_filename)
 
@@ -63,7 +72,7 @@ def process_images_logic(source_base, destination_base, progress_callback):
                         resized_img.save(output_path, 'AVIF', quality=quality)
                         if os.path.getsize(output_path) / 1024 <= config["max_kb"]:
                             break
-
+            
             processed_count += 1
 
         except UnidentifiedImageError:
@@ -71,12 +80,12 @@ def process_images_logic(source_base, destination_base, progress_callback):
         except Exception as e:
             failed_files.append(f"{filename}: {str(e)}")
 
-    # Ergebnis anzeigen
+    # Ergebnis anzeigen (unverändert)
     final_msg = f"{processed_count} von {total_images} Bildern erfolgreich verarbeitet."
     if failed_files:
         error_list = "\n".join(failed_files)
         messagebox.showwarning("Verarbeitung abgeschlossen mit Fehlern",
-                               f"{final_msg}\n\nFehlerhafte Dateien:\n\n{error_list}")
+                              f"{final_msg}\n\nFehlerhafte Dateien:\n\n{error_list}")
     else:
         messagebox.showinfo("Fertig", final_msg)
 

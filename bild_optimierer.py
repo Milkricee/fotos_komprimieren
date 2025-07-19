@@ -2,7 +2,8 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import Image, UnidentifiedImageError
-import pillow_avif  # Stellt sicher, dass AVIF unterstützt wird
+import pillow_avif
+import errno # NEU: Für plattformunabhängige Fehlernummern
 
 # --- Zielprofile definieren ---
 AUSGABE_PROFILE = {
@@ -17,7 +18,6 @@ SUPPORTED_EXTENSIONS = (
 )
 
 def process_images_logic(source_base, destination_base, progress_callback):
-    # 1. Finde alle passenden Dateien REKURSIV mit os.walk()
     files_to_process = []
     for dirpath, _, filenames in os.walk(source_base):
         for filename in filenames:
@@ -34,11 +34,11 @@ def process_images_logic(source_base, destination_base, progress_callback):
     failed_files = []
     processed_count = 0
 
-    # 2. Verarbeite die Liste der gefundenen Dateien (jetzt mit vollem Pfad)
     for i, source_path in enumerate(files_to_process, 1):
-        filename = os.path.basename(source_path) # Hole den reinen Dateinamen aus dem Pfad
+        filename = os.path.basename(source_path)
         progress_callback(f"Verarbeite {i}/{total_images}: {filename}")
 
+        # NEU: Erweiterte Fehlerbehandlung
         try:
             with Image.open(source_path) as img:
                 img.load()
@@ -46,20 +46,15 @@ def process_images_logic(source_base, destination_base, progress_callback):
                 if img.mode in ("RGBA", "P"):
                     img = img.convert("RGB")
 
-                # 3. Stelle die Ordnerstruktur im Ziel wieder her
-                # Ermittle den relativen Pfad des Unterordners
                 relative_dir = os.path.relpath(os.path.dirname(source_path), source_base)
-                
                 name_stem, _ = os.path.splitext(filename)
                 output_filename = f"{name_stem}.avif"
 
                 for profil_name, config in AUSGABE_PROFILE.items():
-                    # Baue den Zielordner inklusive des relativen Unterordners zusammen
                     dest_folder = os.path.join(destination_base, profil_name, relative_dir)
                     os.makedirs(dest_folder, exist_ok=True)
                     output_path = os.path.join(dest_folder, output_filename)
 
-                    # Resize, falls nötig
                     if img.width > config["width"]:
                         ratio = config["width"] / float(img.width)
                         new_height = int(img.height * ratio)
@@ -67,7 +62,6 @@ def process_images_logic(source_base, destination_base, progress_callback):
                     else:
                         resized_img = img
 
-                    # Qualität iterativ anpassen
                     for quality in range(85, 40, -5):
                         resized_img.save(output_path, 'AVIF', quality=quality)
                         if os.path.getsize(output_path) / 1024 <= config["max_kb"]:
@@ -75,18 +69,30 @@ def process_images_logic(source_base, destination_base, progress_callback):
             
             processed_count += 1
 
+        except FileNotFoundError:
+            failed_files.append(f"{filename}: Datei wurde nicht gefunden (während der Verarbeitung gelöscht?).")
+        except PermissionError:
+            failed_files.append(f"{filename}: Fehlende Lese-/Schreibrechte.")
         except UnidentifiedImageError:
-            failed_files.append(f"{filename}: Bildformat konnte nicht erkannt werden.")
+            failed_files.append(f"{filename}: Datei ist beschädigt oder kein Bild.")
+        except OSError as e:
+            if e.errno == errno.ENOSPC: # ENOSPC = No space left on device
+                messagebox.showerror("Kritischer Fehler", f"Festplatte voll! Die Verarbeitung wird bei Datei '{filename}' abgebrochen.")
+                failed_files.append(f"{filename}: Abbruch wegen voller Festplatte.")
+                # Breche die Schleife und die Funktion ab
+                break 
+            else:
+                failed_files.append(f"{filename}: Systemfehler beim Lesen/Speichern ({str(e)}).")
         except Exception as e:
-            failed_files.append(f"{filename}: {str(e)}")
+            failed_files.append(f"{filename}: Ein unerwarteter Fehler ist aufgetreten ({str(e)}).")
 
-    # Ergebnis anzeigen (unverändert)
+    # Ergebnis anzeigen
     final_msg = f"{processed_count} von {total_images} Bildern erfolgreich verarbeitet."
     if failed_files:
         error_list = "\n".join(failed_files)
         messagebox.showwarning("Verarbeitung abgeschlossen mit Fehlern",
                               f"{final_msg}\n\nFehlerhafte Dateien:\n\n{error_list}")
-    else:
+    elif processed_count > 0:
         messagebox.showinfo("Fertig", final_msg)
 
     progress_callback("Bereit.")
@@ -98,28 +104,23 @@ class App:
         self.root.title("Bild-Optimierer 2025")
         self.root.geometry("600x250")
         self.root.resizable(False, False)
-
         self.source_path = ""
 
-        tk.Label(root, text="Wähle einen Ordner mit Bildern aus:", pady=10, font=("Helvetica", 12)).pack()
-
+        tk.Label(root, text="Wähle einen Ordner mit Bildern aus (Unterordner werden durchsucht):", pady=10, font=("Helvetica", 12)).pack()
         self.btn_source = tk.Button(root, text="1. Quellordner auswählen", command=self.select_source, width=30)
         self.btn_source.pack(pady=5)
-
         self.lbl_source = tk.Label(root, text="Kein Ordner ausgewählt", fg="red", wraplength=580)
         self.lbl_source.pack()
-
         self.btn_start = tk.Button(root, text="2. Komprimieren & Speichern unter...",
                                    command=self.start_processing, font=("Helvetica", 10, "bold"),
                                    bg="#4CAF50", fg="white", width=30)
         self.btn_start.pack(pady=15)
-
         self.status_label = tk.Label(root, text="Bereit.", bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X)
 
     def update_status(self, message):
         self.status_label.config(text=message)
-        self.root.update_idletasks()
+        self.root.update() # GEÄNDERT: Sorgt für eine zuverlässigere Aktualisierung
 
     def select_source(self):
         path = filedialog.askdirectory(title="Quellordner mit Bildern auswählen")
@@ -141,7 +142,6 @@ class App:
 
             self.btn_start.config(state=tk.NORMAL, text="2. Komprimieren & Speichern unter...")
             self.btn_source.config(state=tk.NORMAL)
-
 
 if __name__ == '__main__':
     main_window = tk.Tk()
